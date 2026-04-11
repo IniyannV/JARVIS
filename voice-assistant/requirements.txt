@@ -1,0 +1,29 @@
+# Voice Assistant — Python dependencies
+# Install with: pip install -r requirements.txt
+#
+# Pinned to minor versions for reproducibility.
+# Run `pip install -r requirements.txt --upgrade` to get latest patches.
+
+# Speech-to-text (runs locally on Apple Silicon via CTranslate2)
+faster-whisper>=1.0.0,<2.0.0
+
+# Audio capture
+sounddevice>=0.4.6,<0.5.0
+numpy>=1.24.0,<3.0.0
+
+# LLM client (Ollama HTTP)
+requests>=2.31.0,<3.0.0
+
+# Global hotkey listener
+pynput==1.7.6
+
+# macOS automation — keyboard simulation
+pyautogui>=0.9.54,<1.0.0
+
+# macOS menu bar
+rumps>=0.4.0,<1.0.0
+
+# macOS Objective-C bridge (required by rumps + pyautogui on macOS)
+pyobjc-core>=10.0,<11.0
+pyobjc-framework-Cocoa>=10.0,<11.0
+pyobjc-framework-Quartz>=10.0,<11.0
