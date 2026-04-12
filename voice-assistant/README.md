@@ -148,7 +148,7 @@ python install_launchagent.py --remove
 
 ## Logs
 
-All activity is logged to `~/.voice-assistant/`:
+All activity is logged to `~/.voice-assistant/` (override with `VOICE_ASSISTANT_LOG_DIR`; if the default isn’t writable, the app falls back to a local `.voice-assistant/` folder):
 
 | File | Contents |
 |------|----------|
@@ -170,7 +170,8 @@ Edit `config.py` to tune behaviour:
 
 ```python
 WHISPER_MODEL = "tiny.en"     # Change to "base.en" for better accuracy
-SILENCE_THRESHOLD = 0.01      # Raise if too sensitive to background noise
+SILENCE_THRESHOLD = 0.01      # Batch mode only; not used for streaming intent
+VOICE_ACTIVITY_THRESHOLD = 0.008  # Streaming mode: lower if mic is quiet
 SILENCE_DURATION = 2.0        # Seconds of silence before auto-stop
 HOTKEY_DEBOUNCE_MS = 300      # Minimum ms between toggles
 OLLAMA_MODEL = "llama3.2"     # Change to any Ollama model you have pulled

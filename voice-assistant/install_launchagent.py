@@ -52,7 +52,7 @@ def generate_plist(python_path: str, main_py_path: str, log_dir: str) -> str:
     <key>WorkingDirectory</key>
     <string>{os.path.dirname(main_py_path)}</string>
 
-    <!-- Log stdout/stderr to files in ~/.voice-assistant/ -->
+    <!-- Log stdout/stderr to files in the configured log dir -->
     <key>StandardOutPath</key>
     <string>{stdout_log}</string>
     <key>StandardErrorPath</key>

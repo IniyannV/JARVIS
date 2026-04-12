@@ -35,7 +35,7 @@ class VoiceAssistantApp(rumps.App):
         self._toggle_callback = None  # set by controller after init
 
         # Menu items
-        self._state_item = rumps.MenuItem("State: Idle")
+        self._state_item = rumps.MenuItem("State: Not active")
         self._last_cmd_item = rumps.MenuItem("Last command: —")
         self._toggle_btn = rumps.MenuItem("▶ Start Listening", callback=self._on_toggle_clicked)
 
@@ -96,7 +96,7 @@ class VoiceAssistantApp(rumps.App):
             self._toggle_btn.title = "⏹ Stop Listening"
         else:
             self.title = ICON_IDLE
-            self._state_item.title = "State: Idle"
+            self._state_item.title = "State: Not active"
             self._toggle_btn.title = "▶ Start Listening"
 
     @rumps.clicked("Quit Voice Assistant")

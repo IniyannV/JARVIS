@@ -8,9 +8,12 @@ failure. Falls back to {"action": "unknown"} on second failure.
 
 import json
 import logging
+import queue
+import threading
 from typing import Any
 
 import requests
+from concurrent.futures import Future
 
 from config import OLLAMA_MODEL, OLLAMA_TIMEOUT, OLLAMA_URL
 
@@ -217,3 +220,58 @@ def interpret(transcript: str) -> dict[str, Any]:
 
     # --- Fallback ---
     return {"action": "unknown", "raw_command": transcript, "reason": "parse_failure"}
+
+
+class LLMWorker:
+    """
+    Background worker for non-blocking LLM calls.
+
+    Use submit(transcript) -> Future[action_dict].
+    """
+
+    def __init__(self) -> None:
+        self._queue: "queue.Queue[tuple[str, Future]]" = queue.Queue()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True, name="llm-worker")
+        self._thread.start()
+
+    def submit(self, transcript: str) -> Future:
+        fut: Future = Future()
+        self._queue.put((transcript, fut))
+        return fut
+
+    def stop(self) -> None:
+        self._stop.set()
+        try:
+            self._queue.put_nowait(("", Future()))
+        except queue.Full:
+            pass
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            transcript, fut = self._queue.get()
+            if self._stop.is_set():
+                break
+            if fut.cancelled():
+                continue
+            try:
+                fut.set_result(interpret(transcript))
+            except Exception as exc:
+                fut.set_result(
+                    {"action": "unknown", "raw_command": transcript, "reason": f"llm_worker_error: {exc}"}
+                )
+
+
+_worker_singleton: LLMWorker | None = None
+
+
+def get_worker() -> LLMWorker:
+    global _worker_singleton
+    if _worker_singleton is None:
+        _worker_singleton = LLMWorker()
+    return _worker_singleton
+
+
+def interpret_async(transcript: str) -> Future:
+    """Submit transcript for LLM interpretation without blocking the caller."""
+    return get_worker().submit(transcript)

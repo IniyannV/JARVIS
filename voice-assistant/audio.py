@@ -12,12 +12,14 @@ Returns raw WAV bytes ready for the STT engine.
 import io
 import logging
 import threading
+import time
 import wave
 from typing import Optional
 
 import numpy as np
 import sounddevice as sd
 
+import state
 from config import (
     CHANNELS,
     CHUNK_DURATION,
@@ -25,6 +27,8 @@ from config import (
     SAMPLE_RATE,
     SILENCE_DURATION,
     SILENCE_THRESHOLD,
+    STREAM_CHUNK_MS,
+    VOICE_ACTIVITY_THRESHOLD,
 )
 
 logger = logging.getLogger("voice-assistant.audio")
@@ -32,7 +36,13 @@ logger = logging.getLogger("voice-assistant.audio")
 
 def _rms(chunk: np.ndarray) -> float:
     """Compute root-mean-square energy of an audio chunk."""
-    return float(np.sqrt(np.mean(chunk.astype(np.float32) ** 2)))
+    x = chunk.astype(np.float32)
+    # Normalize integer PCM to [-1, 1] so SILENCE_THRESHOLD is meaningful.
+    if np.issubdtype(chunk.dtype, np.integer):
+        max_val = float(np.iinfo(chunk.dtype).max)
+        if max_val > 0:
+            x = x / max_val
+    return float(np.sqrt(np.mean(x ** 2)))
 
 
 def record(stop_event: threading.Event) -> Optional[bytes]:
@@ -116,6 +126,96 @@ def record(stop_event: threading.Event) -> Optional[bytes]:
     # Concatenate and encode as WAV
     audio_data = np.concatenate(frames, axis=0)
     return _encode_wav(audio_data)
+
+
+def stream(
+    stop_event: threading.Event,
+    on_chunk,
+    on_pause=None,
+) -> None:
+    """
+    Stream mic audio chunks until stop_event is set.
+
+    - Never blocks on downstream work: on_chunk should return quickly.
+    - Updates dashboard mic meter and interrupts speaker output when the user
+      starts speaking again.
+
+    Args:
+        stop_event: signal to stop.
+        on_chunk: callable(chunk_f32: np.ndarray, rms: float, ts: float) -> None
+        on_pause: optional callable() invoked when a brief pause is detected.
+    """
+    chunk_duration = STREAM_CHUNK_MS / 1000.0
+    chunk_samples = max(1, int(SAMPLE_RATE * chunk_duration))
+    logger.info("Audio streaming started (SR=%d, chunk=%dms).", SAMPLE_RATE, STREAM_CHUNK_MS)
+
+    stream_obj = sd.InputStream(
+        samplerate=SAMPLE_RATE,
+        channels=CHANNELS,
+        dtype="int16",
+        blocksize=chunk_samples,
+    )
+    stream_obj.start()
+
+    last_voice_ts = 0.0
+    pause_fired = False
+    last_speech_log = 0.0
+
+    try:
+        while not stop_event.is_set():
+            chunk, overflowed = stream_obj.read(chunk_samples)
+            if overflowed:
+                logger.debug("Audio buffer overflowed — some samples dropped.")
+
+            mono_i16 = chunk[:, 0] if chunk.ndim > 1 else chunk
+            chunk_f32 = mono_i16.astype(np.float32) / 32768.0
+            rms = _rms(chunk_f32)
+            now = time.monotonic()
+
+            if state.dashboard is not None:
+                try:
+                    state.dashboard.update_mic_level(rms)
+                except Exception:
+                    pass
+
+            # If the user starts speaking again, interrupt any current speech.
+            if state.speaker is not None and state.speaker.is_speaking and rms > (VOICE_ACTIVITY_THRESHOLD * 1.2):
+                try:
+                    state.speaker.interrupt()
+                except Exception:
+                    pass
+
+            if rms > VOICE_ACTIVITY_THRESHOLD:
+                last_voice_ts = now
+                pause_fired = False
+                if now - last_speech_log >= 1.0:
+                    last_speech_log = now
+                    logger.debug("Speech energy detected (rms=%.4f).", rms)
+            else:
+                if last_voice_ts and (now - last_voice_ts) >= 0.6 and not pause_fired:
+                    pause_fired = True
+                    if on_pause is not None:
+                        try:
+                            on_pause()
+                        except Exception:
+                            pass
+
+            try:
+                on_chunk(chunk_f32, rms, now)
+            except Exception:
+                # Never allow downstream failures to stop mic capture.
+                pass
+    finally:
+        try:
+            stream_obj.stop()
+            stream_obj.close()
+        finally:
+            if state.dashboard is not None:
+                try:
+                    state.dashboard.update_mic_level(0.0)
+                except Exception:
+                    pass
+        logger.info("Audio streaming stopped.")
 
 
 def _encode_wav(audio: np.ndarray) -> bytes:

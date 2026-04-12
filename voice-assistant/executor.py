@@ -12,6 +12,10 @@ import time
 from typing import Tuple
 
 import pyautogui
+from concurrent.futures import Future, ThreadPoolExecutor
+
+import state
+from speaker import build_confirmation
 
 logger = logging.getLogger("voice-assistant.executor")
 
@@ -279,3 +283,53 @@ def execute(action: dict) -> Tuple[bool, str]:
     else:
         logger.error("Unrecognized action type: %s", action_type)
         return False, f"Unrecognized action: {action_type}"
+
+
+class ExecutorService:
+    """
+    Thread-pool backed action executor.
+
+    submit(action, transcript) returns a Future[(success, message)] and also
+    performs best-effort side effects (dashboard + speech) when the action
+    completes.
+    """
+
+    def __init__(self, max_workers: int = 4) -> None:
+        self._pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="exec")
+
+    def submit(self, action: dict, transcript: str = "") -> Future:
+        future: Future = self._pool.submit(execute, action)
+
+        def _done(f: Future) -> None:
+            try:
+                success, message = f.result()
+            except Exception as exc:
+                success, message = False, str(exc)
+
+            # Dashboard update
+            if state.dashboard is not None:
+                try:
+                    state.dashboard.update_action(message, success)
+                except Exception:
+                    pass
+
+            # Spoken feedback
+            if state.speaker is not None:
+                try:
+                    state.speaker.say(build_confirmation(action, success))
+                except Exception:
+                    pass
+
+            # Menu bar last command
+            if hasattr(state, "menubar_app") and state.menubar_app is not None:
+                try:
+                    label = f"{'✓' if success else '✗'} {transcript or message}"
+                    state.menubar_app.update_last_command(label)
+                except Exception:
+                    pass
+
+        future.add_done_callback(_done)
+        return future
+
+    def shutdown(self) -> None:
+        self._pool.shutdown(wait=False, cancel_futures=True)

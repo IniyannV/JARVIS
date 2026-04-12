@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from config import APP_LOG_PATH, COMMAND_LOG_PATH, LOG_DIR
+import state
 
 
 def setup_logging() -> logging.Logger:
@@ -20,15 +21,20 @@ def setup_logging() -> logging.Logger:
     fmt = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
     date_fmt = "%Y-%m-%dT%H:%M:%S"
 
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
+    try:
+        handlers.insert(0, logging.FileHandler(APP_LOG_PATH))
+    except OSError:
+        pass
+
     logging.basicConfig(
         level=logging.DEBUG,
         format=fmt,
         datefmt=date_fmt,
-        handlers=[
-            logging.FileHandler(APP_LOG_PATH),
-            logging.StreamHandler(sys.stdout),
-        ],
+        handlers=handlers,
     )
+    # Keep upstream libraries quieter; our app logs at DEBUG.
+    logging.getLogger("faster_whisper").setLevel(logging.INFO)
     return logging.getLogger("voice-assistant")
 
 
@@ -60,8 +66,23 @@ def log_command(
         "error": error,
     }
 
-    with open(COMMAND_LOG_PATH, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps(record) + "\n")
+    try:
+        with open(COMMAND_LOG_PATH, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record) + "\n")
+    except OSError as e:
+        logging.getLogger("voice-assistant").warning(
+            "Failed to write command log to %s: %s", COMMAND_LOG_PATH, e
+        )
+
+    # Push to dashboard history
+    if state.dashboard is not None:
+        action_label = action_detail.get("action", action_type)
+        result_label = "✓" if success else "✗"
+        state.dashboard.add_history_entry(
+            record["timestamp"],
+            transcript,
+            f"{result_label} {action_label}",
+        )
 
 
 def log_toggle(state: bool) -> None:
