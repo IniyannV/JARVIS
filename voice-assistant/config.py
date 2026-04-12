@@ -46,6 +46,14 @@ VOICE_ACTIVITY_THRESHOLD = 0.008
 # treat the current phrase as a complete command even without a detectable pause.
 INTENT_STABLE_FINALIZE_SEC = 0.8
 
+# --- Wake word / passive listening ---
+WAKE_WORD = "hey jarvis"
+WAKE_WORD_COOLDOWN = 3.0
+ACTIVE_MODE_TIMEOUT = 6.0
+PASSIVE_SAMPLE_RATE = 16000
+WAKE_DETECTION_INTERVAL = 0.25
+WAKE_WORD_CONFIDENCE_THRESHOLD = 0.25
+
 # --- Hotkey ---
 HOTKEY_COMBO = "<alt>+\\"          # Option + backslash
 HOTKEY_DEBOUNCE_MS = 300           # minimum ms between toggles

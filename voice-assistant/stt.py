@@ -148,6 +148,12 @@ class StreamingSTT:
         self._last_emitted: str = ""
         self._speech_active_until = 0.0
 
+    def reset(self) -> None:
+        self._buffer = np.zeros((0,), dtype=np.float32)
+        self._last_run = 0.0
+        self._last_emitted = ""
+        self._speech_active_until = 0.0
+
     def process_audio_chunk(self, chunk: np.ndarray, rms: float) -> Optional[str]:
         """
         Ingest one mono float32 chunk and maybe return a partial transcript.

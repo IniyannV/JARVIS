@@ -208,7 +208,7 @@ class Dashboard:
         content.addSubview_(self._status_circle)
 
         self._status_label = self._make_label(
-            "Not active",
+            "Waiting for 'Hey Jarvis'",
             NSMakeRect(pad + circle_size + 8, y - 2, 160, circle_size + 4),
             font=NSFont.boldSystemFontOfSize_(14),
         )
@@ -378,6 +378,42 @@ class Dashboard:
                     )
                     self._status_label.setString_("Not active")
         _on_main(_do)
+
+    def update_mode(self, mode: str, hard_mute: bool = False) -> None:
+        """
+        Update passive/active/off mode indicator.
+
+        passive: grey dot + Waiting for wake word
+        active:  green dot + Listening...
+        off:     grey dot + Not active
+        """
+        def _do():
+            if not (self._status_circle and self._status_label):
+                return
+            if hard_mute:
+                self._status_circle.layer().setBackgroundColor_(AppKit.NSColor.grayColor().CGColor())
+                self._status_label.setString_("Not active")
+                return
+            if mode == "active":
+                self._status_circle.layer().setBackgroundColor_(AppKit.NSColor.systemGreenColor().CGColor())
+                self._status_label.setString_("Listening...")
+            else:
+                self._status_circle.layer().setBackgroundColor_(AppKit.NSColor.grayColor().CGColor())
+                self._status_label.setString_("Waiting for 'Hey Jarvis'")
+        _on_main(_do)
+
+    def flash_wake(self) -> None:
+        """Briefly flash the status dot to indicate wake word detection."""
+        import threading
+
+        def _set(color):
+            def _do():
+                if self._status_circle:
+                    self._status_circle.layer().setBackgroundColor_(color.CGColor())
+            _on_main(_do)
+
+        _set(AppKit.NSColor.systemYellowColor())
+        threading.Timer(0.5, lambda: _set(AppKit.NSColor.systemGreenColor())).start()
 
     def update_llm_status(self, online: bool) -> None:
         """Update the LLM connectivity indicator."""

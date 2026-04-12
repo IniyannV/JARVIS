@@ -4,12 +4,14 @@ Entry point for the macOS Voice Assistant.
 Startup sequence:
 1. Set up logging and ensure log directory exists.
 2. Instantiate the menu bar app (must run on main thread).
-3. Start the global hotkey listener in a background thread.
-4. The menu bar app's run loop blocks the main thread.
+3. Start always-on audio + workers (passive wake word).
+4. Start the global hotkey listener in a background thread (override).
+5. The menu bar app's run loop blocks the main thread.
 
-When the hotkey fires:
-- Toggle ON  → spawn audio_pipeline thread
-- Toggle OFF → set stop_event, audio thread exits cleanly
+Modes:
+- passive: wake word only ("Hey Jarvis")
+- active:  full streaming STT + intent + execution
+- hard mute: audio ignored entirely
 """
 
 import logging
@@ -20,7 +22,7 @@ import time
 from typing import Optional
 
 from logger import setup_logging
-from config import LOG_DIR
+from config import ACTIVE_MODE_TIMEOUT, LOG_DIR, VOICE_ACTIVITY_THRESHOLD
 from pathlib import Path
 import state
 
@@ -29,79 +31,226 @@ import state
 # Orchestration pipeline
 # ---------------------------------------------------------------------------
 
-def run_streaming_pipeline(stop_event: threading.Event, app) -> None:
+class AlwaysOnOrchestrator:
     """
-    Streaming pipeline:
-      mic chunks → StreamingSTT (worker) → partial transcripts → IntentEngine →
-      command queue → async LLM → safety → executor thread pool
-
-    The mic capture loop must never block on STT/LLM/execution.
+    Single shared audio stream that routes chunks into:
+      - Passive mode: wake word engine only
+      - Active mode: streaming STT → intent → async LLM → executor pool
     """
-    import audio
-    import llm
-    import safety
-    from executor import ExecutorService
-    from intent_engine import IntentEngine
-    from logger import log_command
-    from stt import StreamingSTT
 
-    logger = logging.getLogger("voice-assistant.pipeline")
-    logger.info("Streaming pipeline started.")
+    def __init__(self, app) -> None:
+        self._app = app
+        self._stop_event = threading.Event()
+        self._logger = logging.getLogger("voice-assistant.pipeline")
+        self._mode_lock = threading.Lock()
 
-    audio_q: "queue.Queue[tuple[object, float]]" = queue.Queue(maxsize=64)
-    command_q: "queue.Queue[str]" = queue.Queue(maxsize=32)
+        self._wake_q: "queue.Queue[object]" = queue.Queue(maxsize=256)
+        self._stt_q: "queue.Queue[tuple[object, float]]" = queue.Queue(maxsize=128)
+        self._command_q: "queue.Queue[str]" = queue.Queue(maxsize=32)
 
-    state.streaming_stt = StreamingSTT()
+        self._threads: list[threading.Thread] = []
 
-    def _on_command(cmd_text: str) -> None:
-        logger.info("Detected command: %s", cmd_text)
+    def start(self) -> None:
+        import audio
+        from intent_engine import IntentEngine
+        from stt import StreamingSTT
+        from wake_word import WakeWordEngine
+
+        state.streaming_stt = StreamingSTT()
+        state.intent_engine = IntentEngine(on_command=self._on_command)
+        state.intent_engine.reset_session()
+        state.wake_word_engine = WakeWordEngine()
+
+        # Start workers
+        self._threads = [
+            threading.Thread(target=self._wake_worker, daemon=True, name="wake-worker"),
+            threading.Thread(target=self._stt_worker, daemon=True, name="stt-worker"),
+            threading.Thread(target=self._command_worker, daemon=True, name="cmd-worker"),
+            threading.Thread(target=self._timeout_worker, daemon=True, name="mode-timeout"),
+            threading.Thread(
+                target=lambda: audio.stream(self._stop_event, on_chunk=self._on_chunk, on_pause=self._on_pause),
+                daemon=True,
+                name="audio",
+            ),
+        ]
+        for t in self._threads:
+            t.start()
+
+        self._set_mode("passive", hard_mute=False, speak=False, flash=False)
+        self._logger.info("Always-on pipeline started (passive wake word).")
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+    # ------------------------------------------------------------------
+    # Mode management
+    # ------------------------------------------------------------------
+
+    def hotkey_override(self) -> None:
+        """
+        Hotkey behavior:
+          - If active: hard-mute OFF completely
+          - Otherwise: force active (bypass wake word)
+        """
+        with self._mode_lock:
+            if state.hard_mute:
+                state.hard_mute = False
+                self._set_mode("active", hard_mute=False, speak=False, flash=False)
+                return
+            if state.mode == "active":
+                state.hard_mute = True
+                self._set_mode("passive", hard_mute=True, speak=False, flash=False)
+                return
+            self._set_mode("active", hard_mute=False, speak=False, flash=False)
+
+    def _activate_from_wake(self) -> None:
+        with self._mode_lock:
+            if state.hard_mute:
+                return
+            self._set_mode("active", hard_mute=False, speak=True, flash=True)
+
+    def _set_mode(self, mode: str, hard_mute: bool, speak: bool, flash: bool) -> None:
+        state.mode = mode
+        state.hard_mute = hard_mute
+        state.last_activity_time = time.monotonic()
+
+        if state.streaming_stt is not None:
+            state.streaming_stt.reset()
+        if state.intent_engine is not None:
+            state.intent_engine.reset_session()
+        if state.wake_word_engine is not None and mode == "passive":
+            state.wake_word_engine.reset()
+
         if state.dashboard is not None:
-            state.dashboard.update_processing()
-        try:
-            command_q.put_nowait(cmd_text)
-        except queue.Full:
-            logger.warning("Command queue full; dropping command: %s", cmd_text)
+            state.dashboard.update_mode(mode, hard_mute=hard_mute)
+            if flash and mode == "active":
+                state.dashboard.flash_wake()
+        if state.menubar_app is not None:
+            state.menubar_app.update_mode(mode, hard_mute=hard_mute)
 
-    state.intent_engine = IntentEngine(on_command=_on_command)
-    state.intent_engine.reset_session()
+        if speak and state.speaker is not None and mode == "active":
+            # If waking up, keep it short.
+            state.speaker.say("Yes?")
 
-    def _stt_worker() -> None:
-        while not stop_event.is_set():
+    # ------------------------------------------------------------------
+    # Audio routing
+    # ------------------------------------------------------------------
+
+    def _on_chunk(self, chunk_f32, rms: float, ts: float) -> None:
+        if state.hard_mute:
+            return
+
+        # Keep active mode alive while the user is speaking.
+        if state.mode == "active" and rms > VOICE_ACTIVITY_THRESHOLD:
+            state.last_activity_time = ts
+
+        if state.mode == "passive":
+            # Very light energy gate to keep CPU low, but don't be too strict or
+            # we may miss quiet wake-word audio.
+            if rms < 0.001:
+                return
             try:
-                chunk, rms = audio_q.get(timeout=0.2)
+                self._wake_q.put_nowait(chunk_f32)
+            except queue.Full:
+                pass
+            return
+
+        # Active mode
+        try:
+            self._stt_q.put_nowait((chunk_f32, rms))
+        except queue.Full:
+            pass
+
+    def _on_pause(self) -> None:
+        if state.hard_mute:
+            return
+        if state.mode != "active":
+            return
+        if state.intent_engine is not None:
+            state.intent_engine.notify_pause()
+
+    # ------------------------------------------------------------------
+    # Workers
+    # ------------------------------------------------------------------
+
+    def _wake_worker(self) -> None:
+        from wake_word import WakeDetection
+
+        last_debug = 0.0
+        while not self._stop_event.is_set():
+            try:
+                chunk = self._wake_q.get(timeout=0.2)
             except queue.Empty:
                 continue
+            if state.hard_mute or state.mode != "passive" or state.wake_word_engine is None:
+                continue
+            det: WakeDetection = state.wake_word_engine.process_audio_chunk(chunk)
+            if not det.detected and det.transcript:
+                now = time.monotonic()
+                if now - last_debug >= 1.0:
+                    last_debug = now
+                    self._logger.debug(
+                        "Wake candidate: transcript=%r conf=%.2f",
+                        det.transcript,
+                        det.confidence,
+                    )
+            if det.detected:
+                self._logger.info("Wake word detected (conf=%.2f): %s", det.confidence, det.transcript)
+                self._activate_from_wake()
 
-            transcript = state.streaming_stt.process_audio_chunk(chunk, rms) if state.streaming_stt else None
+    def _stt_worker(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                chunk, rms = self._stt_q.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if state.hard_mute or state.mode != "active" or state.streaming_stt is None:
+                continue
+            transcript = state.streaming_stt.process_audio_chunk(chunk, rms)
             if transcript:
-                logger.debug("Partial transcript: %s", transcript)
+                self._logger.debug("Partial transcript: %s", transcript)
+                state.last_activity_time = time.monotonic()
                 if state.dashboard is not None:
                     state.dashboard.update_transcript(transcript)
                 if state.intent_engine is not None:
                     state.intent_engine.process_transcript(transcript)
 
-    def _command_worker() -> None:
-        while not stop_event.is_set():
+    def _on_command(self, cmd_text: str) -> None:
+        self._logger.info("Detected command: %s", cmd_text)
+        state.last_activity_time = time.monotonic()
+        if state.dashboard is not None:
+            state.dashboard.update_processing()
+        try:
+            self._command_q.put_nowait(cmd_text)
+        except queue.Full:
+            self._logger.warning("Command queue full; dropping command: %s", cmd_text)
+
+    def _command_worker(self) -> None:
+        import llm
+        import safety
+        from logger import log_command
+
+        while not self._stop_event.is_set():
             try:
-                cmd_text = command_q.get(timeout=0.2)
+                cmd_text = self._command_q.get(timeout=0.2)
             except queue.Empty:
                 continue
+            if state.hard_mute:
+                continue
 
-            # LLM must not block mic capture; it runs here (off the audio thread).
             action = llm.interpret_async(cmd_text).result()
-            logger.info("LLM action: %s", action)
+            self._logger.info("LLM action: %s", action)
             safe_action = safety.guard(action)
             if safe_action is None:
                 log_command(cmd_text, action.get("action", "unknown"), action, False, "blocked_by_safety")
-                if app is not None:
-                    app.update_last_command(f"[blocked] {cmd_text}")
+                if self._app is not None:
+                    self._app.update_last_command(f"[blocked] {cmd_text}")
                 continue
 
-            exec_service: ExecutorService = state.executor_service  # set in main()
-            if exec_service is None:
+            if state.executor_service is None:
                 continue
 
-            future = exec_service.submit(safe_action, transcript=cmd_text)
+            future = state.executor_service.submit(safe_action, transcript=cmd_text)
 
             def _log_done(f, _cmd=cmd_text, _act=safe_action):
                 try:
@@ -118,87 +267,19 @@ def run_streaming_pipeline(stop_event: threading.Event, app) -> None:
 
             future.add_done_callback(_log_done)
 
-    stt_thread = threading.Thread(target=_stt_worker, daemon=True, name="stt-worker")
-    cmd_thread = threading.Thread(target=_command_worker, daemon=True, name="cmd-worker")
-    stt_thread.start()
-    cmd_thread.start()
-
-    def _on_chunk(chunk_f32, rms: float, _ts: float) -> None:
-        try:
-            audio_q.put_nowait((chunk_f32, rms))
-        except queue.Full:
-            pass
-
-    def _on_pause() -> None:
-        if state.intent_engine is not None:
-            state.intent_engine.notify_pause()
-
-    try:
-        audio.stream(stop_event, on_chunk=_on_chunk, on_pause=_on_pause)
-    finally:
-        stop_event.set()
-        if state.intent_engine is not None:
-            try:
-                state.intent_engine.notify_pause()
-            except Exception:
-                pass
-        state.streaming_stt = None
-        state.intent_engine = None
-        logger.info("Streaming pipeline stopped.")
-
-
-# ---------------------------------------------------------------------------
-# State management
-# ---------------------------------------------------------------------------
-
-class AssistantController:
-    """
-    Coordinates the hotkey listener, pipeline threads, and menu bar updates.
-    """
-
-    def __init__(self, app) -> None:
-        self._app = app
-        self._lock = threading.Lock()
-        self._pipeline_thread: Optional[threading.Thread] = None
-        self._stop_event: Optional[threading.Event] = None
-        self._logger = logging.getLogger("voice-assistant.controller")
-
-    def on_toggle(self, is_listening: bool) -> None:
-        """Called by HotkeyListener on each debounced toggle."""
-        if state.dashboard is not None:
-            state.dashboard.update_listening_state(is_listening)
-        if is_listening:
-            self._start_listening()
-        else:
-            self._stop_listening()
-
-    def _start_listening(self) -> None:
-        with self._lock:
-            if self._pipeline_thread is not None and self._pipeline_thread.is_alive():
-                self._logger.warning("Pipeline already running — ignoring duplicate toggle ON.")
-                return
-
-            self._stop_event = threading.Event()
-            self._pipeline_thread = threading.Thread(
-                target=run_streaming_pipeline,
-                args=(self._stop_event, self._app),
-                daemon=True,
-                name="pipeline",
-            )
-            self._pipeline_thread.start()
-            self._logger.info("Pipeline thread started.")
-
-        if self._app is not None:
-            self._app.update_state(True)
-
-    def _stop_listening(self) -> None:
-        with self._lock:
-            if self._stop_event is not None:
-                self._stop_event.set()
-                self._logger.info("Stop event sent to pipeline thread.")
-
-        if self._app is not None:
-            self._app.update_state(False)
+    def _timeout_worker(self) -> None:
+        while not self._stop_event.is_set():
+            time.sleep(0.2)
+            if state.hard_mute:
+                continue
+            if state.mode != "active":
+                continue
+            if (time.monotonic() - state.last_activity_time) > ACTIVE_MODE_TIMEOUT:
+                self._logger.info("Active mode timed out; returning to passive.")
+                with self._mode_lock:
+                    if not state.hard_mute and state.mode == "active":
+                        # No speech on timeout.
+                        self._set_mode("passive", hard_mute=False, speak=False, flash=False)
 
 
 # ---------------------------------------------------------------------------
@@ -260,12 +341,10 @@ def main() -> None:
 
     # Build and store dashboard (must happen on main thread, before run loop)
     state.dashboard = Dashboard()
+    orchestrator = AlwaysOnOrchestrator(app)
 
-    # Controller bridges hotkey events ↔ pipeline
-    controller = AssistantController(app)
-
-    # Wire menu button → controller
-    app.set_toggle_callback(controller.on_toggle)
+    # Wire menu button → hotkey-style override
+    app.set_toggle_callback(orchestrator.hotkey_override)
 
     # Optional: wire dashboard into the menu bar app (if supported)
     if hasattr(app, "set_dashboard"):
@@ -276,11 +355,11 @@ def main() -> None:
     state.executor_service = ExecutorService(max_workers=4)
 
     # Start hotkey listener in background thread
-    hotkey_listener = HotkeyListener(on_toggle=controller.on_toggle)
+    hotkey_listener = HotkeyListener(on_press=orchestrator.hotkey_override)
     hotkey_listener.start()
 
     logger.info("Hotkey listener running. Press %s to toggle.", "Option+\\")
-    print("Voice Assistant running. Press Option+\\ to toggle listening.")
+    print("Voice Assistant running. Say 'Hey Jarvis' to activate, or press Option+\\.")
     print("Check the menu bar for status. Logs:", LOG_DIR)
 
     # Startup sequence — runs via a timer so NSApplication is already running
@@ -289,10 +368,11 @@ def main() -> None:
         from dashboard import start_drain_timer
         start_drain_timer()
         state.dashboard.show()
-        state.dashboard.update_listening_state(False)
+        state.dashboard.update_mode(state.mode, hard_mute=state.hard_mute)
         ollama_ok = _check_ollama_status()
         state.dashboard.update_llm_status(ollama_ok)
         state.speaker.say("JARVIS is online")
+        orchestrator.start()
         logger.info("Startup complete. Ollama online: %s", ollama_ok)
 
     import rumps
@@ -305,6 +385,7 @@ def main() -> None:
         logger.info("Keyboard interrupt received.")
     finally:
         hotkey_listener.stop()
+        orchestrator.stop()
         if state.executor_service is not None:
             state.executor_service.shutdown()
         logger.info("Voice Assistant stopped.")

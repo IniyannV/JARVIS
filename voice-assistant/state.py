@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from menubar import VoiceAssistantApp
     from speaker import Speaker
     from stt import StreamingSTT
+    from wake_word import WakeWordEngine
 
 # Set by main() before the run loop starts
 dashboard: Optional["Dashboard"] = None
@@ -21,6 +22,14 @@ speaker: Optional["Speaker"] = None
 menubar_app: Optional["VoiceAssistantApp"] = None
 executor_service: Optional["ExecutorService"] = None
 
-# Set by main() per listening session
+# Mode switching
+# - "passive": always-on wake word detection only
+# - "active": full streaming STT + intent + execution
+mode: str = "passive"
+hard_mute: bool = False  # when True, audio is ignored entirely (no wake word)
+last_activity_time: float = 0.0
+
+# Set by main()
 streaming_stt: Optional["StreamingSTT"] = None
 intent_engine: Optional["IntentEngine"] = None
+wake_word_engine: Optional["WakeWordEngine"] = None
