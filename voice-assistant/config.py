@@ -25,6 +25,8 @@ WHISPER_STREAM_LOGPROB_THRESHOLD = -2.0
 OLLAMA_MODEL = "llama3.2"
 OLLAMA_URL = "http://localhost:11434/api/chat"
 OLLAMA_TIMEOUT = 30                # seconds
+LLM_RESPONSE_MAX_TOKENS = 200
+RESPONSE_TEMPERATURE = 0.7
 
 # --- Audio Capture ---
 SAMPLE_RATE = 16000                # Hz — Whisper expects 16kHz
@@ -53,6 +55,10 @@ ACTIVE_MODE_TIMEOUT = 6.0
 PASSIVE_SAMPLE_RATE = 16000
 WAKE_DETECTION_INTERVAL = 0.25
 WAKE_WORD_CONFIDENCE_THRESHOLD = 0.25
+
+# Speech interruption tuning
+SPEECH_INTERRUPT_GRACE_SEC = 0.8
+SPEECH_INTERRUPT_CONFIRM_CHUNKS = 3
 
 # --- Hotkey ---
 HOTKEY_COMBO = "<alt>+\\"          # Option + backslash
@@ -113,6 +119,7 @@ DASHBOARD_HEIGHT = 500
 DASHBOARD_TITLE = "JARVIS"
 MAX_HISTORY_ENTRIES = 100
 MIC_METER_UPDATE_HZ = 10
+MAX_CONVERSATION_HISTORY = 5
 
 # --- LaunchAgent ---
 LAUNCHAGENT_LABEL = "com.voiceassistant.app"

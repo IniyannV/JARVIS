@@ -27,6 +27,8 @@ from config import (
     SAMPLE_RATE,
     SILENCE_DURATION,
     SILENCE_THRESHOLD,
+    SPEECH_INTERRUPT_CONFIRM_CHUNKS,
+    SPEECH_INTERRUPT_GRACE_SEC,
     STREAM_CHUNK_MS,
     VOICE_ACTIVITY_THRESHOLD,
 )
@@ -132,6 +134,7 @@ def stream(
     stop_event: threading.Event,
     on_chunk,
     on_pause=None,
+    on_voice_start=None,
 ) -> None:
     """
     Stream mic audio chunks until stop_event is set.
@@ -144,6 +147,7 @@ def stream(
         stop_event: signal to stop.
         on_chunk: callable(chunk_f32: np.ndarray, rms: float, ts: float) -> None
         on_pause: optional callable() invoked when a brief pause is detected.
+        on_voice_start: optional callable() invoked when speech starts after silence.
     """
     chunk_duration = STREAM_CHUNK_MS / 1000.0
     chunk_samples = max(1, int(SAMPLE_RATE * chunk_duration))
@@ -160,6 +164,8 @@ def stream(
     last_voice_ts = 0.0
     pause_fired = False
     last_speech_log = 0.0
+    speech_active = False
+    interrupt_candidate_chunks = 0
 
     try:
         while not stop_event.is_set():
@@ -178,14 +184,34 @@ def stream(
                 except Exception:
                     pass
 
-            # If the user starts speaking again, interrupt any current speech.
-            if state.speaker is not None and state.speaker.is_speaking and rms > (VOICE_ACTIVITY_THRESHOLD * 1.2):
+            # Only interrupt TTS after sustained mic energy, and not immediately
+            # after TTS starts, to avoid cutting off on speaker bleed-through.
+            speaker_is_active = state.speaker is not None and state.speaker.is_speaking
+            if speaker_is_active and rms > (VOICE_ACTIVITY_THRESHOLD * 1.5):
+                interrupt_candidate_chunks += 1
+            else:
+                interrupt_candidate_chunks = 0
+
+            if (
+                speaker_is_active
+                and state.speaker is not None
+                and (now - state.speaker.started_at) >= SPEECH_INTERRUPT_GRACE_SEC
+                and interrupt_candidate_chunks >= SPEECH_INTERRUPT_CONFIRM_CHUNKS
+            ):
                 try:
                     state.speaker.interrupt()
                 except Exception:
                     pass
+                interrupt_candidate_chunks = 0
 
             if rms > VOICE_ACTIVITY_THRESHOLD:
+                if not speech_active:
+                    speech_active = True
+                    if on_voice_start is not None and not speaker_is_active:
+                        try:
+                            on_voice_start()
+                        except Exception:
+                            pass
                 last_voice_ts = now
                 pause_fired = False
                 if now - last_speech_log >= 1.0:
@@ -194,6 +220,7 @@ def stream(
             else:
                 if last_voice_ts and (now - last_voice_ts) >= 0.6 and not pause_fired:
                     pause_fired = True
+                    speech_active = False
                     if on_pause is not None:
                         try:
                             on_pause()

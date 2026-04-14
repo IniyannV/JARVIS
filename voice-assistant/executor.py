@@ -15,7 +15,6 @@ import pyautogui
 from concurrent.futures import Future, ThreadPoolExecutor
 
 import state
-from speaker import build_confirmation
 
 logger = logging.getLogger("voice-assistant.executor")
 
@@ -310,13 +309,6 @@ class ExecutorService:
             if state.dashboard is not None:
                 try:
                     state.dashboard.update_action(message, success)
-                except Exception:
-                    pass
-
-            # Spoken feedback
-            if state.speaker is not None:
-                try:
-                    state.speaker.say(build_confirmation(action, success))
                 except Exception:
                     pass
 

@@ -15,7 +15,7 @@ from typing import Any
 import requests
 from concurrent.futures import Future
 
-from config import OLLAMA_MODEL, OLLAMA_TIMEOUT, OLLAMA_URL
+from config import OLLAMA_MODEL, OLLAMA_TIMEOUT, OLLAMA_URL, LLM_RESPONSE_MAX_TOKENS, RESPONSE_TEMPERATURE
 
 logger = logging.getLogger("voice-assistant.llm")
 
@@ -95,6 +95,22 @@ def _call_ollama(system_prompt: str, user_text: str) -> str:
             {"role": "user", "content": user_text},
         ],
     }
+    response = requests.post(OLLAMA_URL, json=payload, timeout=OLLAMA_TIMEOUT)
+    response.raise_for_status()
+    data = response.json()
+    return data["message"]["content"]
+
+def _call_ollama_with_options(system_prompt: str, user_text: str, *, options: dict | None = None) -> str:
+    payload = {
+        "model": OLLAMA_MODEL,
+        "stream": False,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_text},
+        ],
+    }
+    if options:
+        payload["options"] = options
     response = requests.post(OLLAMA_URL, json=payload, timeout=OLLAMA_TIMEOUT)
     response.raise_for_status()
     data = response.json()
@@ -221,6 +237,96 @@ def interpret(transcript: str) -> dict[str, Any]:
     # --- Fallback ---
     return {"action": "unknown", "raw_command": transcript, "reason": "parse_failure"}
 
+_INTENT_SYSTEM_PROMPT = """\
+You are an intent classifier for a macOS voice assistant.
+
+Classify the user's input into exactly one intent type:
+- command: user wants you to do an action on the computer
+- question: user wants an explanation/answer
+- hybrid: user wants both actions and an answer
+
+Output ONLY raw JSON:
+{"intent_type": "command" | "question" | "hybrid"}
+
+Guidelines:
+- "open chrome", "increase volume" -> command
+- "what is recursion", "why is my plant dying" -> question
+- "open chrome and what is recursion", "search how to fix python error" -> hybrid
+"""
+
+_HYBRID_SPLIT_SYSTEM_PROMPT = """\
+You split a single user utterance into actionable commands and questions.
+
+Output ONLY raw JSON:
+{"commands": ["..."], "questions": ["..."]}
+
+Rules:
+- commands should be short, imperative phrases appropriate for a voice assistant
+- questions should be standalone questions the assistant can answer
+- If an action is "search", treat the search itself as a command and extract the concept
+  the user is asking about as a question when appropriate.
+"""
+
+_RESPONSE_SYSTEM_PROMPT = """\
+You are JARVIS, a macOS conversational assistant.
+
+You speak in a confident, natural, slightly verbose tone.
+Avoid robotic phrasing. Avoid repeating the raw transcript.
+If helpful, ask a brief clarifying question.
+
+You are given JSON context about:
+- the user's input
+- intent type
+- actions that were initiated
+- any available results
+- short conversation history
+
+Respond with plain text only (no JSON).
+"""
+
+def classify_intent(text: str) -> str:
+    if not text or not text.strip():
+        return "command"
+    raw = _call_ollama(_INTENT_SYSTEM_PROMPT, text.strip())
+    try:
+        obj = _parse_json(raw)
+        it = (obj.get("intent_type") or "").strip().lower()
+        if it in {"command", "question", "hybrid"}:
+            return it
+    except Exception:
+        pass
+    # Fallback: assume command (safe: leads to action parsing) unless it looks like a question.
+    t = text.strip().lower()
+    if t.endswith("?") or t.startswith(("what", "why", "how", "when", "where", "who")):
+        return "question"
+    return "command"
+
+
+def split_hybrid(text: str) -> dict[str, list[str]]:
+    raw = _call_ollama(_HYBRID_SPLIT_SYSTEM_PROMPT, text.strip())
+    obj = _parse_json(raw)
+    commands = obj.get("commands") if isinstance(obj.get("commands"), list) else []
+    questions = obj.get("questions") if isinstance(obj.get("questions"), list) else []
+    commands = [str(c).strip() for c in commands if str(c).strip()]
+    questions = [str(q).strip() for q in questions if str(q).strip()]
+    return {"commands": commands, "questions": questions}
+
+
+def generate_response(context: dict) -> str:
+    """
+    Generate a natural spoken response for the assistant.
+
+    Context keys:
+      intent_type, user_input, actions_taken, results, conversation_history
+    """
+    options = {
+        "temperature": RESPONSE_TEMPERATURE,
+        "num_predict": LLM_RESPONSE_MAX_TOKENS,
+    }
+    user_text = json.dumps(context, ensure_ascii=False)
+    raw = _call_ollama_with_options(_RESPONSE_SYSTEM_PROMPT, user_text, options=options)
+    return raw.strip()
+
 
 class LLMWorker:
     """
@@ -230,36 +336,43 @@ class LLMWorker:
     """
 
     def __init__(self) -> None:
-        self._queue: "queue.Queue[tuple[str, Future]]" = queue.Queue()
+        self._queue: "queue.Queue[tuple[str, object, Future]]" = queue.Queue()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True, name="llm-worker")
         self._thread.start()
 
-    def submit(self, transcript: str) -> Future:
+    def submit(self, task: str, payload: object) -> Future:
         fut: Future = Future()
-        self._queue.put((transcript, fut))
+        self._queue.put((task, payload, fut))
         return fut
 
     def stop(self) -> None:
         self._stop.set()
         try:
-            self._queue.put_nowait(("", Future()))
+            self._queue.put_nowait(("", "", Future()))
         except queue.Full:
             pass
 
     def _run(self) -> None:
         while not self._stop.is_set():
-            transcript, fut = self._queue.get()
+            task, payload, fut = self._queue.get()
             if self._stop.is_set():
                 break
             if fut.cancelled():
                 continue
             try:
-                fut.set_result(interpret(transcript))
+                if task == "interpret":
+                    fut.set_result(interpret(str(payload)))
+                elif task == "classify_intent":
+                    fut.set_result(classify_intent(str(payload)))
+                elif task == "split_hybrid":
+                    fut.set_result(split_hybrid(str(payload)))
+                elif task == "generate_response":
+                    fut.set_result(generate_response(payload if isinstance(payload, dict) else {}))
+                else:
+                    fut.set_result({"action": "unknown", "raw_command": str(payload), "reason": "unknown_llm_task"})
             except Exception as exc:
-                fut.set_result(
-                    {"action": "unknown", "raw_command": transcript, "reason": f"llm_worker_error: {exc}"}
-                )
+                fut.set_result({"error": f"llm_worker_error: {exc}"})
 
 
 _worker_singleton: LLMWorker | None = None
@@ -274,4 +387,16 @@ def get_worker() -> LLMWorker:
 
 def interpret_async(transcript: str) -> Future:
     """Submit transcript for LLM interpretation without blocking the caller."""
-    return get_worker().submit(transcript)
+    return get_worker().submit("interpret", transcript)
+
+
+def classify_intent_async(text: str) -> Future:
+    return get_worker().submit("classify_intent", text)
+
+
+def split_hybrid_async(text: str) -> Future:
+    return get_worker().submit("split_hybrid", text)
+
+
+def generate_response_async(context: dict) -> Future:
+    return get_worker().submit("generate_response", context)

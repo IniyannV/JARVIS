@@ -8,6 +8,7 @@ Only one utterance plays at a time; a new say() call kills the previous one.
 import logging
 import subprocess
 import threading
+import time
 from typing import Optional
 
 logger = logging.getLogger("voice-assistant.speaker")
@@ -26,6 +27,7 @@ class Speaker:
         self._lock = threading.Lock()
         self._proc: Optional[subprocess.Popen] = None
         self._speaking = False
+        self._started_at = 0.0
 
     def say(self, text: str) -> None:
         """
@@ -57,6 +59,11 @@ class Speaker:
             speaking = self._speaking and proc is not None and proc.poll() is None
         return speaking
 
+    @property
+    def started_at(self) -> float:
+        with self._lock:
+            return self._started_at
+
     def _speak(self, text: str) -> None:
         """Internal: kill previous process, then launch a new one."""
         with self._lock:
@@ -73,6 +80,7 @@ class Speaker:
                     stderr=subprocess.DEVNULL,
                 )
                 self._speaking = True
+                self._started_at = time.monotonic()
             except FileNotFoundError:
                 logger.error("`say` command not found — is this macOS?")
                 return

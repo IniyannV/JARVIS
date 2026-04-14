@@ -3,11 +3,13 @@ Intent engine for streaming partial transcripts.
 
 Goal: detect complete, actionable commands early (before silence) using simple
 heuristics, deduplicate repeated triggers, and hand off finalized commands to
-the (async) LLM/executor pipeline.
+the (async) LLM/executor pipeline. Also emits finalized utterances for
+conversational responses.
 """
 
 from __future__ import annotations
 
+import enum
 import re
 import threading
 import time
@@ -16,6 +18,8 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 from config import COMMAND_DEDUP_WINDOW_SEC, INTENT_STABLE_FINALIZE_SEC
+
+import llm
 
 
 _TRIGGERS = {
@@ -86,16 +90,28 @@ class DetectedCommand:
     detected_at: float
 
 
+class IntentType(enum.Enum):
+    COMMAND = "command"
+    QUESTION = "question"
+    HYBRID = "hybrid"
+
+
 class IntentEngine:
     """
     Streaming intent detector.
 
     - process_transcript() is fast and safe to call frequently (e.g. 2–5 Hz).
-    - When a command is detected, it calls on_command(command_text).
+    - When an early command segment is detected, it calls on_command_segment(text, interaction_id).
+    - When an utterance is finalized (pause/stable), it calls on_interaction_final(full_text, interaction_id).
     """
 
-    def __init__(self, on_command: Callable[[str], None]) -> None:
-        self._on_command = on_command
+    def __init__(
+        self,
+        on_command_segment: Callable[[str, int], None],
+        on_interaction_final: Callable[[str, int], None],
+    ) -> None:
+        self._on_command_segment = on_command_segment
+        self._on_interaction_final = on_interaction_final
         self._lock = threading.Lock()
 
         self._last_partial: str = ""
@@ -108,6 +124,9 @@ class IntentEngine:
         # this is considered "consumed" (already queued for execution).
         self._consumed_tokens = 0
         self._finalize_timer: Optional[threading.Timer] = None
+        self._interaction_id = 0
+        self._last_final_norm = ""
+        self._last_final_ts = 0.0
 
     def reset_session(self) -> None:
         with self._lock:
@@ -115,6 +134,7 @@ class IntentEngine:
             self._last_update = 0.0
             self._queued_this_session.clear()
             self._consumed_tokens = 0
+            self._interaction_id += 1
             if self._finalize_timer is not None:
                 self._finalize_timer.cancel()
                 self._finalize_timer = None
@@ -154,11 +174,10 @@ class IntentEngine:
             self._finalize_timer.start()
 
         for cmd in commands:
-            self._emit_if_not_duplicate(cmd, now)
+            self._emit_command_if_not_duplicate(cmd, now)
 
     def _finalize_if_stable(self, snapshot_text: str) -> None:
         now = time.monotonic()
-        cmd_text: Optional[str] = None
 
         with self._lock:
             if self._last_partial != snapshot_text:
@@ -166,38 +185,47 @@ class IntentEngine:
             if now - self._last_update < INTENT_STABLE_FINALIZE_SEC:
                 return
 
-            tokens = _strip_prefix_noise(_tokenize(self._last_partial))
-            tail = tokens[self._consumed_tokens :]
-            if not tail:
-                return
-            if not any(t in _TRIGGERS for t in tail[:4]):
-                return
-
-            cmd_text = " ".join(tail).strip()
-            self._consumed_tokens = len(tokens)
-
-        if cmd_text:
-            self._emit_if_not_duplicate(cmd_text, now)
+        self._finalize_interaction(reason="stable")
 
     def notify_pause(self) -> None:
         """
         Hint from audio pipeline that a brief pause occurred.
-        Finalizes any remaining unconsumed transcript as a command.
+        Finalizes the current utterance.
         """
+        self._finalize_interaction(reason="pause")
+
+    def _finalize_interaction(self, reason: str) -> None:
         now = time.monotonic()
         with self._lock:
-            tokens = _strip_prefix_noise(_tokenize(self._last_partial))
-            tail = tokens[self._consumed_tokens :]
-            if not tail:
+            text = (self._last_partial or "").strip()
+            if not text:
                 return
-            if not any(t in _TRIGGERS for t in tail[:3]):
+
+            norm = _normalize(text)
+            if not norm:
                 return
-            cmd_text = " ".join(tail).strip()
-            self._consumed_tokens = len(tokens)
 
-        self._emit_if_not_duplicate(cmd_text, now)
+            # Avoid repeated finalize spam on the same phrase.
+            if norm == self._last_final_norm and (now - self._last_final_ts) < 1.0:
+                return
+            self._last_final_norm = norm
+            self._last_final_ts = now
 
-    def _emit_if_not_duplicate(self, command_text: str, now: float) -> None:
+            interaction_id = self._interaction_id
+
+            # Reset per-utterance state but keep recent exec for dedup.
+            self._last_partial = ""
+            self._queued_this_session.clear()
+            self._consumed_tokens = 0
+            self._interaction_id += 1
+            if self._finalize_timer is not None:
+                self._finalize_timer.cancel()
+                self._finalize_timer = None
+
+        # Emit outside lock.
+        self._on_interaction_final(text, interaction_id)
+
+    def _emit_command_if_not_duplicate(self, command_text: str, now: float) -> None:
         normalized = _normalize(command_text)
         if not normalized:
             return
@@ -214,8 +242,28 @@ class IntentEngine:
 
             self._queued_this_session.add(normalized)
             self._recent_exec.append((normalized, now))
+            interaction_id = self._interaction_id
 
-        self._on_command(command_text)
+        self._on_command_segment(command_text, interaction_id)
+
+    # ------------------------------------------------------------------
+    # Conversational classification/splitting (LLM-based as required)
+    # ------------------------------------------------------------------
+
+    def classify_intent(self, text: str) -> IntentType:
+        result = llm.classify_intent_async(text).result()
+        if isinstance(result, str):
+            try:
+                return IntentType(result)
+            except Exception:
+                pass
+        return IntentType.COMMAND
+
+    def split_hybrid(self, text: str) -> dict:
+        result = llm.split_hybrid_async(text).result()
+        if isinstance(result, dict):
+            return result
+        return {"commands": [], "questions": [text]}
 
     def _extract_commands(self, tokens: list[str]) -> tuple[list[str], int]:
         """

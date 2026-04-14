@@ -140,6 +140,7 @@ class Dashboard:
         self._llm_label: NSTextView = None
         self._transcript_field: NSTextView = None
         self._action_field: NSTextView = None
+        self._response_field: NSTextView = None
         self._history_view: NSTextView = None
         self._mic_bar: MicLevelView = None
         self._history: deque = deque(maxlen=MAX_HISTORY_ENTRIES)
@@ -279,6 +280,27 @@ class Dashboard:
         content.addSubview_(self._action_field)
         y -= 12
 
+        # ---- Assistant Response ---------------------------------------
+        y -= 14
+        hdr_resp = self._make_label(
+            "Assistant response:",
+            NSMakeRect(pad, y, content_w - pad * 2, 14),
+            font=NSFont.systemFontOfSize_(11),
+            color=NSColor.secondaryLabelColor(),
+        )
+        content.addSubview_(hdr_resp)
+        y -= 4
+
+        response_h = 72
+        y -= response_h
+        self._response_field = self._make_text_view(
+            NSMakeRect(pad, y, content_w - pad * 2, response_h),
+            font=NSFont.systemFontOfSize_(13),
+            placeholder="—",
+        )
+        content.addSubview_(self._response_field)
+        y -= 12
+
         # ---- Mic level meter ------------------------------------------
         y -= 14
         hdr3 = self._make_label(
@@ -353,6 +375,14 @@ class Dashboard:
                 color = NSColor.systemGreenColor() if success else NSColor.systemRedColor()
                 self._action_field.setString_(text)
                 self._action_field.setTextColor_(color)
+        _on_main(_do)
+
+    def update_response(self, text: str) -> None:
+        """Update the assistant response panel."""
+        def _do():
+            if self._response_field:
+                self._response_field.setString_(text)
+                self._response_field.setTextColor_(NSColor.labelColor())
         _on_main(_do)
 
     def update_processing(self, text: str = "Processing…") -> None:

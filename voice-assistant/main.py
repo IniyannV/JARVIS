@@ -46,9 +46,15 @@ class AlwaysOnOrchestrator:
 
         self._wake_q: "queue.Queue[object]" = queue.Queue(maxsize=256)
         self._stt_q: "queue.Queue[tuple[object, float]]" = queue.Queue(maxsize=128)
-        self._command_q: "queue.Queue[str]" = queue.Queue(maxsize=32)
+        self._command_q: "queue.Queue[tuple[int, str]]" = queue.Queue(maxsize=64)
+        self._interaction_q: "queue.Queue[tuple[int, str]]" = queue.Queue(maxsize=32)
 
         self._threads: list[threading.Thread] = []
+        self._ctx_lock = threading.Lock()
+        self._ctx: dict[int, dict] = {}
+
+        self._response_epoch_lock = threading.Lock()
+        self._response_epoch = 0
 
     def start(self) -> None:
         import audio
@@ -57,7 +63,10 @@ class AlwaysOnOrchestrator:
         from wake_word import WakeWordEngine
 
         state.streaming_stt = StreamingSTT()
-        state.intent_engine = IntentEngine(on_command=self._on_command)
+        state.intent_engine = IntentEngine(
+            on_command_segment=self._on_command_segment,
+            on_interaction_final=self._on_interaction_final,
+        )
         state.intent_engine.reset_session()
         state.wake_word_engine = WakeWordEngine()
 
@@ -66,9 +75,15 @@ class AlwaysOnOrchestrator:
             threading.Thread(target=self._wake_worker, daemon=True, name="wake-worker"),
             threading.Thread(target=self._stt_worker, daemon=True, name="stt-worker"),
             threading.Thread(target=self._command_worker, daemon=True, name="cmd-worker"),
+            threading.Thread(target=self._interaction_worker, daemon=True, name="interaction-worker"),
             threading.Thread(target=self._timeout_worker, daemon=True, name="mode-timeout"),
             threading.Thread(
-                target=lambda: audio.stream(self._stop_event, on_chunk=self._on_chunk, on_pause=self._on_pause),
+                target=lambda: audio.stream(
+                    self._stop_event,
+                    on_chunk=self._on_chunk,
+                    on_pause=self._on_pause,
+                    on_voice_start=self._on_voice_start,
+                ),
                 daemon=True,
                 name="audio",
             ),
@@ -120,6 +135,8 @@ class AlwaysOnOrchestrator:
             state.intent_engine.reset_session()
         if state.wake_word_engine is not None and mode == "passive":
             state.wake_word_engine.reset()
+        with self._ctx_lock:
+            self._ctx.clear()
 
         if state.dashboard is not None:
             state.dashboard.update_mode(mode, hard_mute=hard_mute)
@@ -169,6 +186,11 @@ class AlwaysOnOrchestrator:
         if state.intent_engine is not None:
             state.intent_engine.notify_pause()
 
+    def _on_voice_start(self) -> None:
+        # Cancel pending assistant responses when the user starts speaking again.
+        with self._response_epoch_lock:
+            self._response_epoch += 1
+
     # ------------------------------------------------------------------
     # Workers
     # ------------------------------------------------------------------
@@ -215,15 +237,45 @@ class AlwaysOnOrchestrator:
                 if state.intent_engine is not None:
                     state.intent_engine.process_transcript(transcript)
 
-    def _on_command(self, cmd_text: str) -> None:
-        self._logger.info("Detected command: %s", cmd_text)
+    def _ensure_ctx(self, interaction_id: int) -> dict:
+        with self._ctx_lock:
+            ctx = self._ctx.get(interaction_id)
+            if ctx is None:
+                ctx = {
+                    "executed_norm_segments": set(),
+                    "actions_taken": [],
+                    "results": [],
+                }
+                self._ctx[interaction_id] = ctx
+            return ctx
+
+    def _on_command_segment(self, cmd_text: str, interaction_id: int) -> None:
+        self._logger.info("Detected command segment: %s", cmd_text)
         state.last_activity_time = time.monotonic()
         if state.dashboard is not None:
             state.dashboard.update_processing()
+
+        # Track segment so we can skip it if it appears again in a hybrid split.
+        ctx = self._ensure_ctx(interaction_id)
         try:
-            self._command_q.put_nowait(cmd_text)
+            import re
+            norm = re.sub(r"\\s+", " ", cmd_text.strip().lower())
+            ctx["executed_norm_segments"].add(norm)
+        except Exception:
+            pass
+
+        try:
+            self._command_q.put_nowait((interaction_id, cmd_text))
         except queue.Full:
-            self._logger.warning("Command queue full; dropping command: %s", cmd_text)
+            self._logger.warning("Command queue full; dropping segment: %s", cmd_text)
+
+    def _on_interaction_final(self, full_text: str, interaction_id: int) -> None:
+        self._logger.info("Final utterance: %s", full_text)
+        state.last_activity_time = time.monotonic()
+        try:
+            self._interaction_q.put_nowait((interaction_id, full_text))
+        except queue.Full:
+            self._logger.warning("Interaction queue full; dropping utterance.")
 
     def _command_worker(self) -> None:
         import llm
@@ -232,7 +284,7 @@ class AlwaysOnOrchestrator:
 
         while not self._stop_event.is_set():
             try:
-                cmd_text = self._command_q.get(timeout=0.2)
+                interaction_id, cmd_text = self._command_q.get(timeout=0.2)
             except queue.Empty:
                 continue
             if state.hard_mute:
@@ -250,6 +302,9 @@ class AlwaysOnOrchestrator:
             if state.executor_service is None:
                 continue
 
+            ctx = self._ensure_ctx(interaction_id)
+            ctx["actions_taken"].append(safe_action)
+
             future = state.executor_service.submit(safe_action, transcript=cmd_text)
 
             def _log_done(f, _cmd=cmd_text, _act=safe_action):
@@ -257,6 +312,11 @@ class AlwaysOnOrchestrator:
                     success, message = f.result()
                 except Exception as exc:
                     success, message = False, str(exc)
+                try:
+                    ctx = self._ensure_ctx(interaction_id)
+                    ctx["results"].append({"success": success, "message": message, "action": _act})
+                except Exception:
+                    pass
                 log_command(
                     transcript=_cmd,
                     action_type=_act.get("action", "unknown"),
@@ -266,6 +326,87 @@ class AlwaysOnOrchestrator:
                 )
 
             future.add_done_callback(_log_done)
+
+    def _interaction_worker(self) -> None:
+        import llm
+
+        while not self._stop_event.is_set():
+            try:
+                interaction_id, full_text = self._interaction_q.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if state.hard_mute:
+                continue
+
+            # Snapshot cancellation epoch.
+            with self._response_epoch_lock:
+                epoch = self._response_epoch
+
+            # Build up commands/questions using LLM classification.
+            intent_type = "command"
+            if state.intent_engine is not None:
+                it = state.intent_engine.classify_intent(full_text)
+                intent_type = it.value
+
+            split = {"commands": [], "questions": []}
+            if intent_type == "hybrid" and state.intent_engine is not None:
+                split = state.intent_engine.split_hybrid(full_text)
+            elif intent_type == "command":
+                split = {"commands": [full_text], "questions": []}
+            else:
+                split = {"commands": [], "questions": [full_text]}
+
+            ctx = self._ensure_ctx(interaction_id)
+            already = set(ctx.get("executed_norm_segments", set()))
+
+            # Execute any additional commands discovered by hybrid split.
+            for cmd in split.get("commands", []):
+                norm = " ".join(cmd.strip().lower().split())
+                if norm in already:
+                    continue
+                already.add(norm)
+                try:
+                    self._command_q.put_nowait((interaction_id, cmd))
+                except queue.Full:
+                    pass
+
+            # Prepare response context for the assistant.
+            history = state.get_history_snapshot()
+            response_ctx = {
+                "intent_type": intent_type,
+                "user_input": full_text,
+                "commands": split.get("commands", []),
+                "questions": split.get("questions", []),
+                "actions_taken": list(ctx.get("actions_taken", [])),
+                "results": list(ctx.get("results", [])),
+                "conversation_history": history,
+            }
+
+            fut = llm.generate_response_async(response_ctx)
+            resp = fut.result()
+            if isinstance(resp, dict) and resp.get("error"):
+                continue
+            if not isinstance(resp, str) or not resp.strip():
+                continue
+
+            # Drop stale responses if the user started speaking again.
+            with self._response_epoch_lock:
+                if epoch != self._response_epoch:
+                    continue
+
+            if state.dashboard is not None:
+                state.dashboard.update_response(resp)
+            if state.speaker is not None:
+                state.speaker.say(resp)
+
+            state.append_history(
+                {
+                    "user_input": full_text,
+                    "assistant_response": resp,
+                    "intent_type": intent_type,
+                    "actions": split.get("commands", []),
+                }
+            )
 
     def _timeout_worker(self) -> None:
         while not self._stop_event.is_set():
