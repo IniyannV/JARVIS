@@ -15,7 +15,14 @@ from typing import Any
 import requests
 from concurrent.futures import Future
 
-from config import OLLAMA_MODEL, OLLAMA_TIMEOUT, OLLAMA_URL, LLM_RESPONSE_MAX_TOKENS, RESPONSE_TEMPERATURE
+from config import (
+    COMMAND_RESPONSE_MAX_TOKENS,
+    OLLAMA_MODEL,
+    OLLAMA_TIMEOUT,
+    OLLAMA_URL,
+    QUESTION_RESPONSE_MAX_TOKENS,
+    RESPONSE_TEMPERATURE,
+)
 
 logger = logging.getLogger("voice-assistant.llm")
 
@@ -270,10 +277,6 @@ Rules:
 _RESPONSE_SYSTEM_PROMPT = """\
 You are JARVIS, a macOS conversational assistant.
 
-You speak in a confident, natural, slightly verbose tone.
-Avoid robotic phrasing. Avoid repeating the raw transcript.
-If helpful, ask a brief clarifying question.
-
 You are given JSON context about:
 - the user's input
 - intent type
@@ -281,8 +284,19 @@ You are given JSON context about:
 - any available results
 - short conversation history
 
+For command intents: respond in 1-3 words only (e.g. "Done.", "Opening now.", "Got it."). No explanation.
+For question or hybrid intents: respond in 1-2 sentences max. Be direct and conversational. No filler phrases, no preamble.
+Never start a response with "Sure", "Of course", "Certainly", or similar affirmations.
+Responses will be spoken aloud - keep them natural and concise.
+
 Respond with plain text only (no JSON).
 """
+
+
+def _response_max_tokens_for_intent(intent_type: str) -> int:
+    if intent_type == "command":
+        return COMMAND_RESPONSE_MAX_TOKENS
+    return QUESTION_RESPONSE_MAX_TOKENS
 
 def classify_intent(text: str) -> str:
     if not text or not text.strip():
@@ -319,9 +333,10 @@ def generate_response(context: dict) -> str:
     Context keys:
       intent_type, user_input, actions_taken, results, conversation_history
     """
+    intent_type = str(context.get("intent_type") or "").strip().lower()
     options = {
         "temperature": RESPONSE_TEMPERATURE,
-        "num_predict": LLM_RESPONSE_MAX_TOKENS,
+        "num_predict": _response_max_tokens_for_intent(intent_type),
     }
     user_text = json.dumps(context, ensure_ascii=False)
     raw = _call_ollama_with_options(_RESPONSE_SYSTEM_PROMPT, user_text, options=options)
