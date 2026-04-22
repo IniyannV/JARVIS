@@ -59,6 +59,9 @@ WAKE_WORD_CONFIDENCE_THRESHOLD = 0.25
 # Speech interruption tuning
 SPEECH_INTERRUPT_GRACE_SEC = 0.8
 SPEECH_INTERRUPT_CONFIRM_CHUNKS = 3
+# When True, suppress mic input entirely during TTS playback so Jarvis
+# does not hear or transcribe its own spoken responses.
+MUTE_MIC_WHILE_SPEAKING = True
 
 # --- Hotkey ---
 HOTKEY_COMBO = "<alt>+\\"          # Option + backslash

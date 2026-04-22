@@ -24,6 +24,7 @@ from config import (
     CHANNELS,
     CHUNK_DURATION,
     MAX_RECORDING_DURATION,
+    MUTE_MIC_WHILE_SPEAKING,
     SAMPLE_RATE,
     SILENCE_DURATION,
     SILENCE_THRESHOLD,
@@ -140,8 +141,8 @@ def stream(
     Stream mic audio chunks until stop_event is set.
 
     - Never blocks on downstream work: on_chunk should return quickly.
-    - Updates dashboard mic meter and interrupts speaker output when the user
-      starts speaking again.
+    - Updates dashboard mic meter.
+    - Can suppress mic input while TTS is playing to avoid self-transcription.
 
     Args:
         stop_event: signal to stop.
@@ -178,6 +179,19 @@ def stream(
             rms = _rms(chunk_f32)
             now = time.monotonic()
 
+            speaker_is_active = state.speaker is not None and state.speaker.is_speaking
+            if speaker_is_active and MUTE_MIC_WHILE_SPEAKING:
+                speech_active = False
+                pause_fired = False
+                last_voice_ts = 0.0
+                interrupt_candidate_chunks = 0
+                if state.dashboard is not None:
+                    try:
+                        state.dashboard.update_mic_level(0.0)
+                    except Exception:
+                        pass
+                continue
+
             if state.dashboard is not None:
                 try:
                     state.dashboard.update_mic_level(rms)
@@ -186,7 +200,6 @@ def stream(
 
             # Only interrupt TTS after sustained mic energy, and not immediately
             # after TTS starts, to avoid cutting off on speaker bleed-through.
-            speaker_is_active = state.speaker is not None and state.speaker.is_speaking
             if speaker_is_active and rms > (VOICE_ACTIVITY_THRESHOLD * 1.5):
                 interrupt_candidate_chunks += 1
             else:
