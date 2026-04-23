@@ -24,7 +24,9 @@ import llm
 
 _TRIGGERS = {
     "open",
+    "launch",
     "switch",
+    "focus",
     "search",
     "google",
     "type",
@@ -38,6 +40,15 @@ _TRIGGERS = {
     "sleep",
     "restart",
     "shutdown",
+    "find",
+    "locate",
+    "paste",
+    "git",
+    "commit",
+    "push",
+    "pull",
+    "run",
+    "execute",
 }
 
 _CONJUNCTIONS = {"and", "then"}
@@ -78,7 +89,7 @@ def _strip_prefix_noise(tokens: list[str]) -> list[str]:
 
     # If a trigger exists soon after, discard everything before it.
     for j in range(min(len(tokens), 6)):
-        if tokens[j] in _TRIGGERS:
+        if llm.starts_with_command_trigger(" ".join(tokens[j:])):
             return tokens[j:]
     return tokens
 
@@ -282,8 +293,9 @@ class IntentEngine:
         i = 0
         start = 0
 
-        # If we don't start with a trigger, avoid premature execution.
-        if tokens[0] not in _TRIGGERS:
+        # Only fire early when the tail begins with a known command trigger.
+        tail_text = " ".join(tokens)
+        if len(tokens) < 3 or not llm.starts_with_command_trigger(tail_text):
             return [], 0
 
         while i < len(tokens) - 1:
@@ -296,12 +308,10 @@ class IntentEngine:
                 while seg and seg[-1] in _CONJUNCTIONS:
                     seg = seg[:-1]
                 seg_text = " ".join(seg).strip()
-                if seg_text:
+                if len(seg) >= 3 and llm.has_known_command_trigger(seg_text):
                     commands.append(seg_text)
-                start = i + 1
-                i += 1
-            else:
-                i += 1
+                    start = i + 1
+            i += 1
 
         # We only consume up to start (i.e., committed commands).
         consumed = start

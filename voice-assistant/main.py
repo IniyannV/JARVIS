@@ -19,6 +19,7 @@ import queue
 import sys
 import threading
 import time
+from concurrent.futures import Future, wait
 from typing import Optional
 
 from logger import setup_logging
@@ -245,9 +246,46 @@ class AlwaysOnOrchestrator:
                     "executed_norm_segments": set(),
                     "actions_taken": [],
                     "results": [],
+                    "expected_commands": 0,
+                    "command_futures": [],
+                    "condition": threading.Condition(),
                 }
                 self._ctx[interaction_id] = ctx
             return ctx
+
+    def _mark_command_enqueued(self, interaction_id: int) -> None:
+        ctx = self._ensure_ctx(interaction_id)
+        condition = ctx["condition"]
+        with condition:
+            ctx["expected_commands"] += 1
+            condition.notify_all()
+
+    def _register_command_future(self, interaction_id: int, future: Future) -> None:
+        ctx = self._ensure_ctx(interaction_id)
+        condition = ctx["condition"]
+        with condition:
+            ctx["command_futures"].append(future)
+            condition.notify_all()
+
+    def _wait_for_command_results(self, interaction_id: int, timeout_sec: float) -> None:
+        deadline = time.monotonic() + timeout_sec
+        ctx = self._ensure_ctx(interaction_id)
+        condition = ctx["condition"]
+
+        with condition:
+            while len(ctx["command_futures"]) < ctx["expected_commands"]:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                condition.wait(timeout=remaining)
+            futures = list(ctx["command_futures"])
+
+        if not futures:
+            return
+
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            wait(futures, timeout=remaining)
 
     def _on_command_segment(self, cmd_text: str, interaction_id: int) -> None:
         self._logger.info("Detected command segment: %s", cmd_text)
@@ -266,6 +304,7 @@ class AlwaysOnOrchestrator:
 
         try:
             self._command_q.put_nowait((interaction_id, cmd_text))
+            self._mark_command_enqueued(interaction_id)
         except queue.Full:
             self._logger.warning("Command queue full; dropping segment: %s", cmd_text)
 
@@ -290,24 +329,48 @@ class AlwaysOnOrchestrator:
             if state.hard_mute:
                 continue
 
+            completion_future: Future = Future()
+            self._register_command_future(interaction_id, completion_future)
+
             action = llm.interpret_async(cmd_text).result()
+            if not isinstance(action, dict) or action.get("action") not in llm._VALID_ACTIONS:
+                action = {"action": "unknown", "raw_command": cmd_text, "reason": "interpret_worker_error"}
+            action = llm._sanity_check(cmd_text, action)
             self._logger.info("LLM action: %s", action)
             safe_action = safety.guard(action)
             if safe_action is None:
+                ctx = self._ensure_ctx(interaction_id)
+                ctx["results"].append(
+                    {
+                        "success": False,
+                        "message": "blocked_by_safety",
+                        "action": action,
+                    }
+                )
+                completion_future.set_result((False, "blocked_by_safety"))
                 log_command(cmd_text, action.get("action", "unknown"), action, False, "blocked_by_safety")
                 if self._app is not None:
                     self._app.update_last_command(f"[blocked] {cmd_text}")
                 continue
 
             if state.executor_service is None:
+                ctx = self._ensure_ctx(interaction_id)
+                ctx["results"].append(
+                    {
+                        "success": False,
+                        "message": "executor_unavailable",
+                        "action": safe_action,
+                    }
+                )
+                completion_future.set_result((False, "executor_unavailable"))
                 continue
 
             ctx = self._ensure_ctx(interaction_id)
             ctx["actions_taken"].append(safe_action)
 
-            future = state.executor_service.submit(safe_action, transcript=cmd_text)
+            executor_future = state.executor_service.submit(safe_action, transcript=cmd_text)
 
-            def _log_done(f, _cmd=cmd_text, _act=safe_action):
+            def _log_done(f, _cmd=cmd_text, _act=safe_action, _completion=completion_future):
                 try:
                     success, message = f.result()
                 except Exception as exc:
@@ -317,6 +380,8 @@ class AlwaysOnOrchestrator:
                     ctx["results"].append({"success": success, "message": message, "action": _act})
                 except Exception:
                     pass
+                if not _completion.done():
+                    _completion.set_result((success, message))
                 log_command(
                     transcript=_cmd,
                     action_type=_act.get("action", "unknown"),
@@ -325,7 +390,7 @@ class AlwaysOnOrchestrator:
                     error="" if success else message,
                 )
 
-            future.add_done_callback(_log_done)
+            executor_future.add_done_callback(_log_done)
 
     def _interaction_worker(self) -> None:
         import llm
@@ -367,8 +432,11 @@ class AlwaysOnOrchestrator:
                 already.add(norm)
                 try:
                     self._command_q.put_nowait((interaction_id, cmd))
+                    self._mark_command_enqueued(interaction_id)
                 except queue.Full:
                     pass
+
+            self._wait_for_command_results(interaction_id, timeout_sec=5.0)
 
             # Prepare response context for the assistant.
             history = state.get_history_snapshot()
