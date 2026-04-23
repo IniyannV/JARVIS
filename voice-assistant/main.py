@@ -506,6 +506,7 @@ def main() -> None:
     # Startup sequence — runs via a timer so NSApplication is already running
     def _startup(_timer):
         _timer.stop()  # fire once only
+        import clipboard
         from dashboard import start_drain_timer
         start_drain_timer()
         state.dashboard.show()
@@ -514,6 +515,11 @@ def main() -> None:
         state.dashboard.update_llm_status(ollama_ok)
         state.speaker.say("JARVIS is online")
         orchestrator.start()
+        threading.Thread(
+            target=clipboard.poll_clipboard,
+            daemon=True,
+            name="clipboard-poller",
+        ).start()
         logger.info("Startup complete. Ollama online: %s", ollama_ok)
 
     import rumps

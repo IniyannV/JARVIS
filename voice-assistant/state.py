@@ -41,6 +41,10 @@ wake_word_engine: Optional["WakeWordEngine"] = None
 conversation_history: list[dict] = []
 conversation_lock = threading.Lock()
 
+# Clipboard history
+clipboard_history: list[str] = []
+clipboard_lock = threading.Lock()
+
 
 def append_history(item: dict) -> None:
     with conversation_lock:

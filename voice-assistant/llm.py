@@ -44,6 +44,12 @@ Respond with EXACTLY one of these schemas:
 {"action": "type_text",        "text": "<string>"}
 {"action": "press_keys",       "keys": ["<key1>", "<key2>"]}
 {"action": "system_action",    "command": "<volume_up|volume_down|mute|screenshot|sleep>"}
+{"action": "find_file",        "query": "<file name query>"}
+{"action": "open_recent",      "query": "<file name pattern>"}
+{"action": "reveal_in_finder", "query": "<file path or name>"}
+{"action": "paste_clip",       "index": <integer>}
+{"action": "git_command",      "command": "<status|add_all|commit|push|pull|log|diff|branch|checkout|stash|stash_pop>", "message": "<optional commit message>", "branch": "<optional branch>", "repo_path": "<optional path>"}
+{"action": "run_script",       "script": "<allowlisted command>", "args": "<argument string>"}
 {"action": "unknown",          "raw_command": "<original text>", "reason": "<why>"}
 
 Examples:
@@ -63,6 +69,19 @@ Examples:
 "turn down the volume"       -> {"action": "system_action", "command": "volume_down"}
 "mute"                       -> {"action": "system_action", "command": "mute"}
 "put computer to sleep"      -> {"action": "system_action", "command": "sleep"}
+"find my resume"             -> {"action": "find_file", "query": "resume"}
+"open my latest project"     -> {"action": "open_recent", "query": "project"}
+"show me config.py"          -> {"action": "reveal_in_finder", "query": "config.py"}
+"paste my last clipboard"    -> {"action": "paste_clip", "index": 1}
+"paste second to last clip"  -> {"action": "paste_clip", "index": 2}
+"git status"                 -> {"action": "git_command", "command": "status"}
+"commit with message fix login bug" -> {"action": "git_command", "command": "commit", "message": "fix login bug"}
+"push to origin"             -> {"action": "git_command", "command": "push"}
+"what branch am I on"        -> {"action": "git_command", "command": "branch"}
+"pull latest"                -> {"action": "git_command", "command": "pull"}
+"run pytest"                 -> {"action": "run_script", "script": "pytest", "args": ""}
+"start the dev server"       -> {"action": "run_script", "script": "npm", "args": "run dev"}
+"run make build"             -> {"action": "run_script", "script": "make", "args": "build"}
 
 Rules:
 - Use open_url for specific websites (YouTube, GitHub, Reddit, Gmail, etc.).
@@ -70,6 +89,11 @@ Rules:
 - For web_search, the query should be what would go into a Google search bar.
 - Use the full, proper application name (e.g., "Google Chrome" not "chrome").
 - For press_keys, use lowercase pyautogui key names (e.g., "command", "shift", "space").
+- Use find_file to open a named file result and reveal_in_finder when the user wants to see the file in Finder.
+- Use open_recent when the user asks for the latest or most recent file matching a name pattern.
+- Use paste_clip for requests to paste an earlier clipboard item; index 1 means most recent.
+- Use git_command for supported git verbs; use "message" for commit text and "branch" for checkout targets.
+- Use run_script only when the user explicitly asks to run a terminal/dev command.
 - If the command is unclear or does not map to any action, use "unknown".
 - NEVER output anything other than the JSON object.\
 """
@@ -166,6 +190,12 @@ _VALID_ACTIONS = {
     "type_text",
     "press_keys",
     "system_action",
+    "find_file",
+    "open_recent",
+    "reveal_in_finder",
+    "paste_clip",
+    "git_command",
+    "run_script",
     "unknown",
 }
 

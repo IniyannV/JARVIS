@@ -115,8 +115,17 @@ COMMAND_LOG_PATH = os.path.join(LOG_DIR, "command_log.jsonl")
 APP_LOG_PATH = os.path.join(LOG_DIR, "app.log")
 
 # --- Safety ---
-DANGEROUS_ACTIONS = ["sleep", "restart", "shutdown", "delete"]
+DANGEROUS_ACTIONS = ["sleep", "restart", "shutdown", "delete", "run_script"]
 DANGEROUS_CONFIRM_TIMEOUT = 5      # seconds to wait for confirmation
+
+# --- Clipboard ---
+CLIPBOARD_HISTORY_MAX = 20
+
+# --- Terminal command runner ---
+TERMINAL_SCRIPT_ALLOWLIST = {
+    "pytest", "python", "npm", "npx", "make", "cargo", "go",
+    "uvicorn", "flask", "fastapi", "yarn", "pnpm", "tsc",
+}
 
 # --- Dashboard ---
 DASHBOARD_WIDTH = 600
