@@ -11,13 +11,13 @@ via a hotkey, transcribes with Whisper, interprets intent with a local LLM
 ## How It Works
 
 ```
-Option+\  →  microphone on  →  faster-whisper (local)  →  Ollama llama3.2 (local)  →  macOS action
+Jarvis  →  active listening  →  faster-whisper (local)  →  Ollama llama3.2 (local)  →  macOS action
 ```
 
-1. Press **Option + \\** to start listening (menu bar turns 🔴)
+1. Say **Jarvis** to activate the assistant
 2. Say your command
 3. After 2 seconds of silence, the command is processed automatically
-4. Press **Option + \\** again to cancel before silence is detected
+4. Press **Option + \\** to force listening or cancel early
 
 ---
 
@@ -110,6 +110,7 @@ A 🎙 icon appears in the menu bar. The app is now running in the background.
 
 | Action | How |
 |--------|-----|
+| Wake the assistant | Say **Jarvis** |
 | Start listening | Press **Option + \\** |
 | Stop early | Press **Option + \\** again |
 | Auto-stop | 2 seconds of silence |
@@ -224,7 +225,7 @@ main.py
 → Grant Accessibility permission. Some apps (Terminal itself) block synthetic input.
 
 **Commands misrecognised**
-→ Switch to `base.en` in `config.py` for better STT accuracy.
+→ Speak **Jarvis** clearly for wake-up, or switch to `base.en` in `config.py` for better STT accuracy.
 
 **LLM returns non-JSON**
 → The retry logic handles this. If persistent, try `ollama pull llama3.2` to re-download the model.

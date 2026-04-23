@@ -143,12 +143,15 @@ class WakeWordEngine:
         else:
             confidence = 0.6
 
-        # Require phrase match (not just "jarvis"), with a small amount of fuzz.
+        # Require the primary wake word, while still allowing "hey jarvis" as
+        # a fuzzy fallback.
         tokens = transcript.split()
         has_jarvis = "jarvis" in tokens
         has_hey = "hey" in tokens
         wake = self._wake_word.split()
-        exact_phrase = " ".join(wake) in transcript
+        primary_wake = wake[0] if wake else "jarvis"
+        exact_phrase = primary_wake in tokens
+        hey_jarvis_phrase = "hey jarvis" in transcript
 
         # Fuzzy: hey ... jarvis within 3 tokens.
         close_phrase = False
@@ -157,7 +160,7 @@ class WakeWordEngine:
             jar_idx = [i for i, t in enumerate(tokens) if t == "jarvis"]
             close_phrase = any(abs(h - j) <= 3 for h in hey_idx for j in jar_idx)
 
-        detected = (exact_phrase or close_phrase) and has_jarvis and has_hey
+        detected = has_jarvis and (exact_phrase or hey_jarvis_phrase or close_phrase)
 
         # Tighten: keep it wake-like (short) to reduce false positives.
         if len(tokens) > 10:

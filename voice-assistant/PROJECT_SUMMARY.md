@@ -18,7 +18,7 @@ The project is designed to run fully locally after setup, with no cloud APIs or 
 JARVIS uses a two-mode listening architecture:
 
 - `passive` mode
-  - continuously monitors microphone audio for the wake phrase `"hey jarvis"`
+  - continuously monitors microphone audio for the wake phrase `"jarvis"`
   - uses a lightweight wake-word pipeline with a small rolling audio buffer
   - keeps CPU usage lower than full always-on transcription
 
@@ -33,7 +33,7 @@ There is also a `hard_mute` state used by the hotkey override to fully silence t
 
 ## Main Capabilities
 
-- Wake word activation with `"Hey Jarvis"`
+- Wake word activation with `"Jarvis"`
 - Hotkey override via `Option + \`
 - Passive and active listening modes
 - Streaming transcription with rolling audio windows
@@ -157,7 +157,7 @@ The app is intentionally non-blocking:
 Typical flow:
 
 1. JARVIS starts in passive mode.
-2. User says: `"Hey Jarvis"`
+2. User says: `"Jarvis"`
 3. JARVIS switches to active mode and replies: `"Yes?"`
 4. User speaks a command, question, or hybrid request.
 5. Commands start executing immediately when possible.

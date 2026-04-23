@@ -70,7 +70,7 @@ def _tokenize(text: str) -> list[str]:
     return [t for t in _normalize(text).split(" ") if t]
 
 def _strip_prefix_noise(tokens: list[str]) -> list[str]:
-    # Drop a short "wake word / politeness" prefix, e.g. "hey jarvis please".
+    # Drop a short "wake word / politeness" prefix, e.g. "jarvis please".
     i = 0
     while i < min(len(tokens), 5) and tokens[i] in _PREFIX_NOISE:
         i += 1

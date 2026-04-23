@@ -209,7 +209,7 @@ class Dashboard:
         content.addSubview_(self._status_circle)
 
         self._status_label = self._make_label(
-            "Waiting for 'Hey Jarvis'",
+            "Waiting for 'Jarvis'",
             NSMakeRect(pad + circle_size + 8, y - 2, 160, circle_size + 4),
             font=NSFont.boldSystemFontOfSize_(14),
         )
@@ -429,7 +429,7 @@ class Dashboard:
                 self._status_label.setString_("Listening...")
             else:
                 self._status_circle.layer().setBackgroundColor_(AppKit.NSColor.grayColor().CGColor())
-                self._status_label.setString_("Waiting for 'Hey Jarvis'")
+                self._status_label.setString_("Waiting for 'Jarvis'")
         _on_main(_do)
 
     def flash_wake(self) -> None:

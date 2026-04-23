@@ -9,7 +9,7 @@ Startup sequence:
 5. The menu bar app's run loop blocks the main thread.
 
 Modes:
-- passive: wake word only ("Hey Jarvis")
+- passive: wake word only ("Jarvis")
 - active:  full streaming STT + intent + execution
 - hard mute: audio ignored entirely
 """
@@ -500,7 +500,7 @@ def main() -> None:
     hotkey_listener.start()
 
     logger.info("Hotkey listener running. Press %s to toggle.", "Option+\\")
-    print("Voice Assistant running. Say 'Hey Jarvis' to activate, or press Option+\\.")
+    print("Voice Assistant running. Say 'Jarvis' to activate, or press Option+\\.")
     print("Check the menu bar for status. Logs:", LOG_DIR)
 
     # Startup sequence — runs via a timer so NSApplication is already running
