@@ -107,21 +107,33 @@ class AlwaysOnOrchestrator:
           - If active: hard-mute OFF completely
           - Otherwise: force active (bypass wake word)
         """
+        import media_control
+
         with self._mode_lock:
             if state.hard_mute:
                 state.hard_mute = False
                 self._set_mode("active", hard_mute=False, speak=False, flash=False)
+                # Resuming from hard-mute — treat like a normal deactivation.
+                media_control.resume_after_speech(resume_delay=0.0)
                 return
             if state.mode == "active":
                 state.hard_mute = True
                 self._set_mode("passive", hard_mute=True, speak=False, flash=False)
+                # User is forcing off — resume any paused media immediately.
+                media_control.resume_after_speech(resume_delay=0.0)
                 return
+            # Activating via hotkey — pause media just like a wake word.
+            media_control.pause_all()
             self._set_mode("active", hard_mute=False, speak=False, flash=False)
 
     def _activate_from_wake(self) -> None:
+        import media_control
+
         with self._mode_lock:
             if state.hard_mute:
                 return
+            # Pause all media before activating so JARVIS can hear clearly.
+            media_control.pause_all()
             self._set_mode("active", hard_mute=False, speak=True, flash=True)
 
     def _set_mode(self, mode: str, hard_mute: bool, speak: bool, flash: bool) -> None:
@@ -329,6 +341,7 @@ class AlwaysOnOrchestrator:
 
     def _interaction_worker(self) -> None:
         import llm
+        import media_control
 
         while not self._stop_event.is_set():
             try:
@@ -385,19 +398,28 @@ class AlwaysOnOrchestrator:
             fut = llm.generate_response_async(response_ctx)
             resp = fut.result()
             if isinstance(resp, dict) and resp.get("error"):
+                # No spoken response — resume media now since JARVIS won't speak.
+                media_control.resume_after_speech(resume_delay=0.5)
                 continue
             if not isinstance(resp, str) or not resp.strip():
+                # No spoken response — resume media now since JARVIS won't speak.
+                media_control.resume_after_speech(resume_delay=0.5)
                 continue
 
             # Drop stale responses if the user started speaking again.
             with self._response_epoch_lock:
                 if epoch != self._response_epoch:
+                    # Stale — user already spoke again; resume media immediately.
+                    media_control.resume_after_speech(resume_delay=0.0)
                     continue
 
             if state.dashboard is not None:
                 state.dashboard.update_response(resp)
             if state.speaker is not None:
                 state.speaker.say(resp)
+
+            # Schedule media resume: waits for speaker to finish + 0.5s grace.
+            media_control.resume_after_speech(resume_delay=0.5)
 
             state.append_history(
                 {
@@ -409,6 +431,8 @@ class AlwaysOnOrchestrator:
             )
 
     def _timeout_worker(self) -> None:
+        import media_control
+
         while not self._stop_event.is_set():
             time.sleep(0.2)
             if state.hard_mute:
@@ -419,8 +443,9 @@ class AlwaysOnOrchestrator:
                 self._logger.info("Active mode timed out; returning to passive.")
                 with self._mode_lock:
                     if not state.hard_mute and state.mode == "active":
-                        # No speech on timeout.
                         self._set_mode("passive", hard_mute=False, speak=False, flash=False)
+                        # No speech on timeout — resume media immediately.
+                        media_control.resume_after_speech(resume_delay=0.0)
 
 
 # ---------------------------------------------------------------------------
