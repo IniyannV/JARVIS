@@ -162,7 +162,7 @@ def _is_open_url_text(text: str) -> bool:
 
 def _is_open_application_text(text: str) -> bool:
     return (
-        _starts_with_any_phrase(text, _OPEN_APP_TRIGGERS)
+        (_starts_with_any_phrase(text, _OPEN_APP_TRIGGERS) or _contains_any_phrase(text, _OPEN_APP_TRIGGERS))
         and not _is_open_url_text(text)
         and not _is_run_script_text(text)
         and not _is_git_text(text)
@@ -433,6 +433,16 @@ def _unknown_action(transcript: str, reason: str) -> dict[str, str]:
 def _sanity_check(transcript: str, action: dict[str, Any]) -> dict[str, Any]:
     normalized = _normalize_text(transcript)
     action_type = action.get("action", "unknown")
+    prefix_noise = (
+        "i want to",
+        "i need to",
+        "could you",
+        "would you",
+        "can you",
+        "jarvis",
+        "please",
+        "hey",
+    )
 
     if action_type == "unknown":
         return action
@@ -440,6 +450,19 @@ def _sanity_check(transcript: str, action: dict[str, Any]) -> dict[str, Any]:
     def fail() -> dict[str, Any]:
         logger.warning("Sanity check rejected action %s for transcript %r", action, transcript)
         return _unknown_action(transcript, "sanity_check_failed")
+
+    while normalized:
+        stripped = normalized
+        for prefix in prefix_noise:
+            if stripped == prefix:
+                stripped = ""
+                break
+            if stripped.startswith(f"{prefix} "):
+                stripped = stripped[len(prefix) + 1 :].strip()
+                break
+        if stripped == normalized:
+            break
+        normalized = stripped
 
     if not normalized:
         return fail()
@@ -809,3 +832,22 @@ def split_hybrid_async(text: str) -> Future:
 
 def generate_response_async(context: dict) -> Future:
     return get_worker().submit("generate_response", context)
+
+
+if __name__ == "__main__":
+    _SANITY_CHECK_CASES = [
+        ("open chrome", {"action": "open_application", "app_name": "Google Chrome"}),
+        ("jarvis open chrome", {"action": "open_application", "app_name": "Google Chrome"}),
+        ("please open chrome", {"action": "open_application", "app_name": "Google Chrome"}),
+        ("switch to terminal", {"action": "switch_window", "app_name": "Terminal"}),
+        ("volume up", {"action": "system_action", "command": "volume_up"}),
+        ("turn up the volume", {"action": "system_action", "command": "volume_up"}),
+        ("take a screenshot", {"action": "system_action", "command": "screenshot"}),
+        ("mute", {"action": "system_action", "command": "mute"}),
+    ]
+
+    for transcript, action in _SANITY_CHECK_CASES:
+        checked = _sanity_check(transcript, action)
+        assert checked == action, f"sanity check rejected valid transcript: {transcript!r} -> {checked!r}"
+
+    print("llm.py sanity checks passed")
